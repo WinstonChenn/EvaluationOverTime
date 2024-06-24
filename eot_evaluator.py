@@ -7,12 +7,14 @@ out-of sample test performance.
 
 import pickle
 import os
+import numpy as np
 
 from emdot.eot_dataset import EotDataset
 from emdot.models.ExpModel import ExpModel
 from tqdm import tqdm
 from emdot.utils import dict_combos
-from typing import Optional
+from typing import Optional, Callable
+from sklearn.model_selection import StratifiedKFold, RandomizedSearchCV
 
 class EotEvaluator:
     def __init__(
@@ -22,6 +24,7 @@ class EotEvaluator:
         model: ExpModel, 
         model_name: str, 
         search_space: dict, 
+        eval_func: Callable
         ):
         """Initializes Evaluator object.
 
@@ -37,19 +40,29 @@ class EotEvaluator:
                         "learning_rate": [0.01, 0.1]
                     }
         """
-        assert issubclass(model, ExpModel)
+        # assert issubclass(model, ExpModel)
         
         self.dataset = dataset
         self.method = method
         self.model = model
         self.model_name = model_name
         self.search_space = search_space
+        self.eval_func = eval_func
         
-        self.best_results = None
         self.best_model = None
-        self.best_bparams = None
+        self.best_hparams = None
+
+    def load_best_model(self, model_folder):
+        path = self.get_model_path(model_folder)
+        assert os.path.isfile(path)
+        with open(path, "rb") as f:
+            self.best_model = pickle.load(f)
+        f.close()
+        self.best_hparams = self.best_model.get_params()
+        
             
-    def fit_best_model(self, eval_metric: str = "auc"):
+    def fit_best_model(self, eval_metric: str = "roc_auc", n_iter: int = 100, n_jobs: int = 100, 
+                       verbose: int=1, n_fold: int=5):
         """Performs grid search over the self.search_space hyperparameter grid.
         
         Selects the trained model with the best validation performance.
@@ -60,39 +73,18 @@ class EotEvaluator:
                 returned in a dictionary provided by the evaluate() function in the 
                 ExpModel in self.model. Assumes that higher is better.
         """
-        hparams_list = dict_combos(self.search_space)
 
-        ## Get_dataset
-        X_train, y_train = self.dataset.get_train()
-        X_val, y_val = self.dataset.get_val()
+        ## Get_dataset (no explicite validation set, use CV)
+        X_train, y_train = self.dataset.get_train(return_df=False)
+        X_val, y_val = self.dataset.get_val(return_df=False)
+        X_train = np.vstack((X_train, X_val))
+        y_train = np.concatenate((y_train, y_val))
 
-        best_results = None
-        best_model = None
-        best_hparams = None
-        
-        for hparams in tqdm(hparams_list, desc="Hyperparameters", leave=False):
-            ## Initialize the model with hyperparameter
-            model = self.model(**hparams)
-                
-            ## Train the model
-            model.fit(X_train, y_train)
-            
-            ## Evaluate the model based on validation dataset
-            results = model.evaluate(X_val, y_val)
-            
-            ## Record the model that has highest auc
-            if best_results is None:
-                best_results = results
-                best_model = model
-                best_hparams = hparams
-            elif results[eval_metric] > best_results[eval_metric]:
-                best_results = results
-                best_model = model
-                best_hparams = hparams
-                
-        self.best_results = best_results
-        self.best_model = best_model
-        self.best_hparams = best_hparams
+        clf = RandomizedSearchCV(self.model(), self.search_space, n_iter=n_iter, n_jobs=n_jobs, 
+                                 verbose=verbose, cv=StratifiedKFold(n_fold), scoring=eval_metric)
+        clf.fit(X_train, y_train)
+        self.best_model = clf.best_estimator_
+        self.best_hparams = clf.best_params_
                 
     def in_sample_test(self):
         """Evaluates in-sample testing performance.
@@ -103,16 +95,15 @@ class EotEvaluator:
         assert self.best_model is not None, "Forget to fit the model"
         
         ## Get in-sample test data
-        X_test, y_test = self.dataset.get_test_in_sample()
-        
-        in_sample_result = self.best_model.evaluate(X_test, y_test)
+        X_test, y_test = self.dataset.get_test_in_sample(return_df=False)
+        in_sample_result = self.eval_func(self.best_model, X_test, y_test)
         
         return {
-            "model": self.best_model.get_name(),
+            "model": self.model_name,
             "test_type": "insample",
             "train_start": self.dataset.train_start_t,
             "train_end": self.dataset.train_end_t,
-            "test_start": self.dataset.train_end_t,
+            "test_start": self.dataset.train_start_t,
             "test_end": self.dataset.train_end_t,
             **in_sample_result,
             **self.dataset.get_dataset_info(),
@@ -142,13 +133,13 @@ class EotEvaluator:
             test_end_year = test_start_year
         
         ## Get out-sample test data
-        X_test, y_test = self.dataset.get_test_out_sample(test_start_year, test_end_year=test_end_year)
-        
+        X_test, y_test = self.dataset.get_test_out_sample(test_start_year, 
+            test_end_year=test_end_year, return_df=False)
         ## Evaluate out-sample test performance
-        out_sample_result = self.best_model.evaluate(X_test, y_test)
+        out_sample_result = self.eval_func(self.best_model, X_test, y_test)
         
         return {
-            "model": self.best_model.get_name(),
+            "model": self.model_name,
             "test_type": "outsample",
             "train_start": self.dataset.train_start_t,
             "train_end": self.dataset.train_end_t,
@@ -172,15 +163,14 @@ class EotEvaluator:
 
         if model_folder is not None:
             ## Store the model
-            folder_path = os.path.join(model_folder, self.model_name, self.dataset.dataset_name)
-            if not os.path.exists(folder_path):
-                os.makedirs(folder_path)
-            model_path = os.path.join(folder_path, f"{self.dataset.dataset_name}_{self.model_name}_{str(self.dataset.train_start_t)}_{str(self.dataset.train_end_t)}_{self.method}_{self.dataset.seed}.pkl")
-            
+            model_path = self.get_model_path(model_folder=model_folder)
             with open(model_path, "wb") as f:
                 pickle.dump(self.best_model, f)
             f.close()
         
+    def get_model_path(self, model_folder="./model_info"):
+        return os.path.join(model_folder, f"{str(self.dataset.train_start_t)}_{str(self.dataset.train_end_t)}_{self.method}.pkl")
+
     def get_coef_dict(self):
         # For models where get_coefs() does not return None, 
         # return a dictionary containing the coefficients and some experiment parameters

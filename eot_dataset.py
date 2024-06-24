@@ -26,6 +26,7 @@ class EotDataset:
         test_prop: float = 0.1, 
         window_length: Optional[int] = None, 
         subsample: bool = False,
+        standardize: bool = True
         ):
         """Initialize the EotDataset object
         
@@ -71,9 +72,10 @@ class EotDataset:
         self.test_size = test_prop
         self.window_length = window_length
         self.subsample = subsample
-        
+        self.standardize = standardize
+
         ## Initialize scaler function for normalizing numeric features
-        self.scaler = StandardScaler()
+        if standardize: self.scaler = StandardScaler()
         
         ## Filter for in-sample data
         mask = self.df[self.col_dict["time_col"]].between(self.train_start_t, self.train_end_t)
@@ -181,9 +183,8 @@ class EotDataset:
         """
         numerical_cols = self.col_dict["numerical_features"]
         
-        if len(numerical_cols) == 0:
+        if len(numerical_cols) == 0 or not self.standardize:
             return df
-        
         if fit:
             df.loc[:, numerical_cols] = self.scaler.fit_transform(df.loc[:, numerical_cols])
         else:

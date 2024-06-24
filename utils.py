@@ -54,7 +54,7 @@ def plot_metric_vs_time(df, metric, dataset_name, fig, ax,
     cm_list = cm.get_cmap(cm_name, range_len)
     
     for (train_end, df_tmp), color in zip(df.groupby("train_end"), 
-                                          cm_list(np.linspace(0, 1, range_len))[::-1]):
+                                          cm_list(np.linspace(0.2, 1, range_len))[::-1]):
         
         mean_list = []
         std_list = []
@@ -64,11 +64,11 @@ def plot_metric_vs_time(df, metric, dataset_name, fig, ax,
             std_list.append(df_temp[metric].std())
             test_end_list.append(df_temp["test_end"].unique().item())
         std_list = std_list / np.sqrt(num_seed)
-        # ax.plot(test_end_list, mean_auc, label=train_end, lw=lw, color=color)
-        # ax.fill_between(test_end_list, [i - 1.96 * j for i, j in zip(mean_auc, std_auc)],
-        #                     [i + 1.96 * j for i, j in zip(mean_auc, std_auc)], alpha=0.1, color=color)
-        ax.errorbar(test_end_list, mean_list, yerr=std_list, label=train_end, lw=1, color=color)
-        ax.plot(test_end_list[0], mean_list[0], marker='o', markersize=5, markeredgecolor=color, markerfacecolor=color)
+        ax.plot(test_end_list, mean_list, label=train_end, lw=lw, color=color)
+        ax.fill_between(test_end_list, [i - 1.96 * j for i, j in zip(mean_list, std_list)],
+                            [i + 1.96 * j for i, j in zip(mean_list, std_list)], alpha=0.1, color=color)
+        ax.plot(test_end_list[0], mean_list[0], marker='o', markersize=10, markeredgecolor=color, markerfacecolor=color)
+        # ax.errorbar(test_end_list, mean_list, yerr=std_list, label=train_end, lw=1, color=color)
         
     if title:
         ax.set_title(title, size=title_font)
@@ -86,8 +86,8 @@ def plot_metric_vs_time(df, metric, dataset_name, fig, ax,
     ax.grid(alpha=0.3)
 
     if cax is not None:
-        fig.colorbar(cm.ScalarMappable(cmap=cm_name), cax=cax, orientation=cax_orientation, ticks=[0,1])
-        cax.set_xticklabels(cax_ticks)
+        cb = fig.colorbar(cm.ScalarMappable(cmap=cm_name), cax=cax, orientation=cax_orientation, ticks=[0,1])
+        cb.set_ticklabels(cax_ticks)
     
     if ylim:
         ax.set_ylim(ylim)

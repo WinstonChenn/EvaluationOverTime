@@ -1,6 +1,8 @@
+import os
 import pandas as pd
 from typing import Tuple, Optional
 from tqdm import tqdm
+from typing import Callable
 
 from emdot.models.ExpModel import ExpModel
 from emdot.eot_dataset import EotDataset
@@ -31,6 +33,7 @@ class EotExperiment:
         val_prop: float,
         test_prop: float,
         window_length: int,
+        eval_func: Callable,
         time_unit: str = 'Year',
         model_folder: Optional[str] = './model_info'):
         """Constructor for EotExperiment.
@@ -89,6 +92,7 @@ class EotExperiment:
         self.val_prop = val_prop
         self.test_prop = test_prop
         self.window_length = window_length - 1
+        self.eval_func = eval_func
         self.time_unit = time_unit
         self.model_folder = model_folder
         self.subsample =  'subsampling' in training_regime
@@ -101,7 +105,7 @@ class EotExperiment:
             assert self.initial_train_window[1] - self.window_length >= self.initial_train_window[0], \
                 'The number of timepoints in the subsampling window length should at most as large as the training window.'
 
-    def run_experiment(self, seed_list, eval_metric="auc"):
+    def run_experiment(self, seed=0, eval_metric="auc", standardize=True, n_iter=100,  n_jobs=100,  n_fold=5, overwrite=False):
         """Runs an experiment evaluating model performance over time.
         
         Args:
@@ -113,67 +117,61 @@ class EotExperiment:
             result_df: dataframe containing results of experiment
             model_info: coefficient information of the trained models, if exists. Otherwise, None.
         """
-        model_info = []
         test_results = []
-        for seed in tqdm(seed_list, desc="Seed", leave=False):
-            for train_end_t in tqdm(range(self.initial_train_window[1], self.train_end + 1), 
-                                    desc="Train {self.time_unit}", leave=False):
-                ## Calculate left bound of in-sample time range
-                if self.training_regime in ["all_historical", "all_historical_subsampling"]:
-                    train_start_t = self.initial_train_window[0]
-                else: 
-                    assert self.training_regime == "sliding_window", "Invalid training regime provided."
-                    train_start_t = train_end_t - self.window_length
+        for train_end_t in range(self.initial_train_window[1], self.train_end + 1):
+            ## Calculate left bound of in-sample time range
+            if self.training_regime in ["all_historical", "all_historical_subsampling"]:
+                train_start_t = self.initial_train_window[0]
+            else: 
+                assert self.training_regime == "sliding_window", "Invalid training regime provided."
+                train_start_t = train_end_t - self.window_length
+            print(f"Training seed={seed}, time: {train_start_t}-{train_end_t}")
+            
+            ## Initialize the dataset
+            dataset_object = EotDataset(
+                df_processed = self.df,
+                col_dict = self.col_dict,
+                label=self.label,
+                train_start_t=train_start_t,
+                train_end_t=train_end_t,
+                seed=seed,
+                dataset_name=self.dataset_name,
+                train_prop=self.train_prop,
+                val_prop=self.val_prop,
+                test_prop=self.test_prop,
+                window_length=self.window_length,
+                subsample=self.subsample,
+                standardize=standardize
+            )
                 
-                ## Initialize the dataset
-                dataset_object = EotDataset(
-                    df_processed = self.df,
-                    col_dict = self.col_dict,
-                    label=self.label,
-                    train_start_t=train_start_t,
-                    train_end_t=train_end_t,
-                    seed=seed,
-                    dataset_name=self.dataset_name,
-                    train_prop=self.train_prop,
-                    val_prop=self.val_prop,
-                    test_prop=self.test_prop,
-                    window_length=self.window_length,
-                    subsample=self.subsample,
-                )
-                    
-                ## Initialize the evaluator
-                evaluator = EotEvaluator(
-                    dataset=dataset_object,
-                    method=self.training_regime,
-                    model=self.model_class,
-                    model_name=self.model_name,
-                    search_space=self.hyperparam_grid
-                )
-                
-                ## Fit the model, searching over the hyperparam_grid for best validation performance.
-                # results are stored in eva.best_results, eva.best_model, eva.best_hparams.
-                evaluator.fit_best_model(eval_metric=eval_metric)
+            ## Initialize the evaluator
+            evaluator = EotEvaluator(
+                dataset=dataset_object,
+                method=self.training_regime,
+                model=self.model_class,
+                model_name=self.model_name,
+                search_space=self.hyperparam_grid,
+                eval_func=self.eval_func
+            )
+            
+            ## Fit the model, searching over the hyperparam_grid for best validation performance.
+            # results are stored in eva.best_results, eva.best_model, eva.best_hparams.
+            if not os.path.isfile(evaluator.get_model_path(model_folder=self.model_folder)) or overwrite:
+                evaluator.fit_best_model(eval_metric=eval_metric, n_iter=n_iter, n_jobs=n_jobs, 
+                    verbose=3, n_fold=n_fold)
                 evaluator.save_best_model(model_folder=self.model_folder)  # save model to folder
-                
-                # get coefficients
-                coefs = evaluator.get_coef_dict()
-                if coefs is not None:
-                    model_info.append(coefs)
-                
-                # collect and save results on in-sample test sets
-                test_results.append(evaluator.in_sample_test())
-                
-                # collect and save results on out-of-sample test sets
-                for test_t in tqdm(range(train_end_t + 1, self.test_end + 1), 
-                                      desc=f"Test {self.time_unit}", leave=False):
-                    test_results.append(evaluator.out_sample_test(test_t))
+            else:
+                evaluator.load_best_model(model_folder=self.model_folder)
+            
+            # collect and save results on in-sample test sets
+            test_results.append(evaluator.in_sample_test())
+            
+            # collect and save results on out-of-sample test sets
+            for test_t in tqdm(range(train_end_t + 1, self.test_end + 1), 
+                                desc=f"Test {self.time_unit}: {train_end_t + 1} - {self.test_end}"):
+                test_results.append(evaluator.out_sample_test(test_t))
 
         result_df = pd.DataFrame(test_results)
         result_df["staleness"] = result_df["test_end"] - result_df["train_end"]
 
-        if model_info:
-            model_info = pd.DataFrame(model_info)
-        else:
-            model_info = None
-
-        return result_df, model_info
+        return result_df
